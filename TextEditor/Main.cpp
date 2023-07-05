@@ -8,7 +8,9 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
+#include <winbase.h>
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -17,13 +19,23 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <assert.h>
 
 #include <string>
+#include <utility>
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-bool HandleKeyPress(WPARAM virtualKeyCode, LPARAM otherState);
+bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState);
 void AppendUtf16Char(const wchar_t* buffer, size_t length);
 
+/* xy is baseline xy at which to draw the cursor.
+ */
+void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
+
 std::wstring g_fileContents;
+/*Cursor in between this index of g_fileContents and the char before it.*/
+int g_cursor = 0;
+int g_selection = -1;
+
+HFONT g_editorFont;
 
 enum ButtonControlIdentifier {
     SAVE_BUTTON,
@@ -32,6 +44,7 @@ enum ButtonControlIdentifier {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
 {
+
     // Register the window class.
     const wchar_t CLASS_NAME[] = L"Sample Window Class";
 
@@ -89,6 +102,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         NULL
     );
 
+    g_editorFont = CreateFont(
+        0, 0, // height, width
+        0, 0, // escapement, orientation
+        FW_DONTCARE,
+        false, false, false, // italic, underline, strikeout
+        ANSI_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY,
+        FF_DONTCARE,
+        L"Consolas"
+    );
+
     SendMessage(openFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
     SendMessage(saveFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
 
@@ -122,14 +148,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
-        HBRUSH brush = CreateSolidBrush(RGB(0xff, 0x0, 0x0));
         HDC hdc = BeginPaint(hwnd, &ps);
+        HBRUSH brush = CreateSolidBrush(RGB(255, 0x0, 0x0));
 
         FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
 
-        SelectFont(hdc, (HGDIOBJ)GetStockObject(DEFAULT_GUI_FONT));
-
-        {
+        { // draw text
             RECT rect;
 
             GetWindowRect(hwnd, &rect);
@@ -140,11 +164,44 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             rect.right = windowWidth;
             rect.bottom = windowHeight;
 
+            SelectFont(hdc, g_editorFont);
+
             DrawText(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
         }
 
-        EndPaint(hwnd, &ps);
+        { // draw cursor
+            int x, y, textHeight;
+            GetCursorPosition(hdc, g_cursor, &x, &y, &textHeight);
+            constexpr int CURSOR_WIDTH_PX = 2;
+            RECT cursorRect;
+
+            cursorRect.left = x;
+            cursorRect.right = x + CURSOR_WIDTH_PX;
+            cursorRect.bottom = y;
+            cursorRect.top = y - textHeight;
+
+            FillRect(hdc, &cursorRect, brush);
+        }
+
+        if (g_selection >= 0) {
+            HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
+
+            int x, y, textHeight;
+            GetCursorPosition(hdc, g_selection, &x, &y, &textHeight);
+            constexpr int CURSOR_WIDTH_PX = 2;
+            RECT selectionRect;
+
+            selectionRect.left = x;
+            selectionRect.right = x + CURSOR_WIDTH_PX;
+            selectionRect.bottom = y;
+            selectionRect.top = y - textHeight;
+
+            FillRect(hdc, &selectionRect, selectBrush);
+            DeleteObject(selectBrush);
+        }
+
         DeleteObject(brush);
+        EndPaint(hwnd, &ps);
 
         return 0;
     }
@@ -215,7 +272,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_KEYDOWN:
     {
-        bool shouldRedraw = HandleKeyPress(wParam, lParam);
+        bool shouldRedraw = HandleKeyPress(hwnd, wParam, lParam);
 
         if (shouldRedraw) {
             InvalidateRect(hwnd, NULL, true);
@@ -224,68 +281,232 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_CHAR:
+    {
+        constexpr char ESCAPE = 0x1B;
+        switch (wParam)
+        {
+        case '\b':
+        {
+            if (g_cursor <= 0) {
+                break;
+            }
+
+            const wchar_t* deleteEnd = g_fileContents.c_str() + g_cursor;
+            const wchar_t* deleteStart = CharPrevW(
+                g_fileContents.c_str(),
+                g_fileContents.c_str() + g_cursor
+            );
+
+            int removed = deleteEnd - deleteStart;
+            int deleteStartIdx = deleteStart - g_fileContents.c_str();
+
+            g_fileContents.erase(deleteStartIdx, removed);
+            g_cursor--;
+        }
+        case '\t':
+            // handle a tab insertion
+            break;
+        case '\r':
+        case '\n':
+        {
+            // insert a new line
+            wchar_t wc = L'\n';
+            g_fileContents.insert(g_cursor, &wc, 1);
+            g_cursor++;
+            break;
+        }
+        case ESCAPE:
+            break;
+        default:
+        {
+            if (!iswprint((wchar_t)wParam)) {
+                break;
+            }
+            wchar_t wc = (wchar_t)wParam;
+            g_fileContents.insert(g_cursor, &wc, 1);
+            g_cursor++;
+            break;
+        }
+        }
+        InvalidateRect(hwnd, NULL, true);
     }
-    return DefWindowProc(hwnd, uMsg, wParam, lParam);
+
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+    }
+
+    return 0;
 }
 
 /*Returns true if should redraw the window.
  */
-bool HandleKeyPress(WPARAM virtualKeyCode, LPARAM otherState)
+bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
 {
-    constexpr size_t KEYBOARD_STATE_SIZE = 256;
-    uint8_t keyboardState[KEYBOARD_STATE_SIZE];
+    constexpr short KEYDOWN_MASK = 0x8000;
 
-    if (!GetKeyboardState(keyboardState)) {
-        DebugBreak();
-        abort();
-    }
+    constexpr int VK_A = 0x41;
+    constexpr int VK_C = ('c' - 'a') + VK_A;
+    constexpr int VK_V = ('v' - 'a') + VK_A;
 
     const int repeatCount = 0xffff & otherState;
     const int scanCode = (0xff0000 & otherState) >> 16;
     const bool isExtended = (0x1000000 & otherState) >> 24;
     const int previousState = (0x80000000 & otherState) >> 31;
 
-    constexpr size_t MAX_UTF16_CHARACTER = 2;
-    wchar_t outChar[MAX_UTF16_CHARACTER];
 
-    int value;
-
-    value = ToUnicode(virtualKeyCode, scanCode, keyboardState, outChar, MAX_UTF16_CHARACTER, 0);
-
-    if (0 == value) {
-        // no op
-        return false;
-    }
-    else if (value > 0) {
-        AppendUtf16Char(outChar, value);
+    switch (virtualKeyCode) {
+    case VK_LEFT:
+    {
+        bool shiftPressed = GetKeyState(VK_SHIFT) & KEYDOWN_MASK;
+        if (shiftPressed) {
+            if (g_selection < 0) {
+                g_selection = std::max(0, g_cursor - 1);
+            }
+            else {
+                g_selection = std::max(0, g_selection - 1);
+            }
+        }
+        else {
+            if (g_selection < 0) {
+                g_cursor = std::max(0, g_cursor - 1);
+            }
+            else {
+                g_cursor = std::min(g_cursor, g_selection);
+                g_selection = -1;
+            }
+        }
         return true;
     }
-    else if (value < 0) {
-        return false;
+    case VK_RIGHT:
+    {
+        bool shiftPressed = GetKeyState(VK_SHIFT) & KEYDOWN_MASK;
+        if (shiftPressed) {
+            if (g_selection < 0) {
+                g_selection = std::min(g_cursor + 1, (int)g_fileContents.length());
+            }
+            else {
+                g_selection = std::min(g_selection + 1, (int)g_fileContents.length());
+            }
+        }
+        else {
+            if (g_selection < 0) {
+                g_cursor = std::min(g_cursor + 1, (int)g_fileContents.length());
+            }
+            else {
+                g_cursor = std::max(g_cursor, g_selection);
+                g_selection = -1;
+            }
+        }
+        return true;
     }
+    case VK_C:
+    {
+        bool controlPressed = GetKeyState(VK_CONTROL) & KEYDOWN_MASK;
+        if (controlPressed) {
+            // Ctrl+C: copy!
+            if (g_selection < 0) {
+                return false; // without selection, copy does nothing
+            }
+
+            int selectionStart = std::min(g_cursor, g_selection);
+            int selectionEnd = std::max(g_cursor, g_selection);
+
+            HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, selectionEnd - selectionStart + 1);
+            char* ascii = (char *)GlobalLock(global);
+            for (int i = selectionStart; i < selectionEnd; i++) {
+                ascii[i - selectionStart] = (char)g_fileContents[i];
+            }
+            GlobalUnlock(global);
+
+            OpenClipboard(hwnd);
+            EmptyClipboard();
+            SetClipboardData(CF_TEXT, ascii);
+            CloseClipboard();
+
+            return false;
+        }
+    }
+    case VK_V:
+    {
+        bool controlPressed = GetKeyState(VK_CONTROL) & KEYDOWN_MASK;
+        if (controlPressed) {
+            // Ctrl+V: paste!
+
+            OpenClipboard(hwnd);
+            if (IsClipboardFormatAvailable(CF_TEXT)) {
+                HGLOBAL hGlobal = GetClipboardData(CF_TEXT);
+                const char *text = (const char *)GlobalLock(hGlobal);
+
+                if (NULL != text) {
+                    // Now we paste
+
+                    wchar_t* wtext = (wchar_t*)calloc(strlen(text) + 1, sizeof * wtext);
+                    for (int i = 0; i < strlen(text); i++)
+                        wtext[i] = (wchar_t)text[i];
+
+                    if (g_selection >= 0) {
+                        int selectionStart = std::min(g_cursor, g_selection);
+                        int selectionEnd = std::max(g_cursor, g_selection);
+
+                        g_fileContents.replace(
+                            selectionStart, selectionEnd - selectionStart,
+                            wtext, wcslen(wtext));
+
+                        g_cursor = std::max(g_cursor, g_selection);
+                        g_selection = -1;
+                    }
+                    else {
+                        g_fileContents.insert(g_cursor, wtext, wcslen(wtext));
+                        g_cursor += wcslen(wtext);
+                    }
+
+                    free(wtext);
+
+                    GlobalUnlock(hGlobal);
+                }
+            }
+            CloseClipboard();
+        }
+    }
+    }
+
+    return false;
 }
 
-void AppendUtf16Char(const wchar_t* buffer, size_t length)
+void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight)
 {
-    constexpr wchar_t BACKSPACE = L'\x0008';
+    const wchar_t* fullBlock = L"\x2588";
 
-    if (length == 1 && *buffer == BACKSPACE) {
-        if (g_fileContents.empty()) {
-            return;
+    SIZE size;
+
+    if (!GetTextExtentPoint32(
+            hdc,
+            fullBlock,
+            wcslen(fullBlock),
+            &size)) {
+        DebugBreak();
+        abort();
+    }
+
+    // TODO test this following part of the function
+
+    int cursorLineIdx = 0;
+    int lineStart = 0;
+
+    for (int i = 0; i <= g_fileContents.length(); i++) {
+        if (i > 0 && g_fileContents[i - 1] == L'\n') {
+            lineStart = i;
+            cursorLineIdx++;
         }
 
-        const wchar_t *end = g_fileContents.c_str() + g_fileContents.size();
-        const wchar_t *newEnd = CharPrevW(
-            g_fileContents.c_str(),
-            g_fileContents.c_str() + g_fileContents.size()
-        );
-
-        int removed = end - newEnd;
-        int newEndIndex = newEnd - g_fileContents.c_str();
-
-        g_fileContents.erase(newEndIndex, removed);
+        if (i == cursorIndex)
+            break;
     }
-    else {
-        g_fileContents.insert(g_fileContents.size(), buffer, length);
-    }
+
+    int cursorColumnIdx = cursorIndex - lineStart;
+
+    *x = cursorColumnIdx * size.cx;
+    *y = (cursorLineIdx + 1) * size.cy;
+    *textHeight = size.cy;
 }
