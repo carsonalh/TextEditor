@@ -30,7 +30,7 @@ void AppendUtf16Char(const wchar_t* buffer, size_t length);
  */
 void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
 
-std::wstring g_fileContents;
+std::string g_fileContents;
 /*Cursor in between this index of g_fileContents and the char before it.*/
 int g_cursor = 0;
 int g_selection = -1;
@@ -166,7 +166,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
             SelectFont(hdc, g_editorFont);
 
-            DrawText(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
+            DrawTextA(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
         }
 
         { // draw cursor
@@ -225,8 +225,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
             if (LOWORD(wParam) == SAVE_BUTTON) {
                 if (GetSaveFileNameA(&ofn)) {
-                    FILE* f;
-                    fopen_s(&f, selectedFile, "w");
+                    FILE *f = fopen(selectedFile, "w");
 
                     size_t written = fwrite(g_fileContents.c_str(), sizeof g_fileContents[0], g_fileContents.length(), f);
                     assert(written == g_fileContents.length());
@@ -246,15 +245,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     sizeBytes = ftell(f);
                     fseek(f, 0, SEEK_SET);
 
-                    const size_t newSize = 1 + sizeBytes / 2;
-
-                    g_fileContents.resize(newSize, 0);
+                    g_fileContents.resize(sizeBytes, 0);
 
                     size_t read = fread(&g_fileContents[0], sizeof g_fileContents[0], g_fileContents.length(), f);
-                    assert(read % 2 == 0 && "file must be utf 16");
-
-                    size_t actualLength = wcsnlen(g_fileContents.c_str(), newSize);
-                    g_fileContents.resize(actualLength, 0);
 
                     fclose(f);
 
@@ -292,8 +285,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 break;
             }
 
-            const wchar_t* deleteEnd = g_fileContents.c_str() + g_cursor;
-            const wchar_t* deleteStart = CharPrevW(
+            const char* deleteEnd = g_fileContents.c_str() + g_cursor;
+            const char* deleteStart = CharPrevA(
                 g_fileContents.c_str(),
                 g_fileContents.c_str() + g_cursor
             );
@@ -311,8 +304,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         case '\n':
         {
             // insert a new line
-            wchar_t wc = L'\n';
-            g_fileContents.insert(g_cursor, &wc, 1);
+            const char lf = '\n';
+            g_fileContents.insert(g_cursor, &lf, 1);
             g_cursor++;
             break;
         }
@@ -323,8 +316,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             if (!iswprint((wchar_t)wParam)) {
                 break;
             }
-            wchar_t wc = (wchar_t)wParam;
-            g_fileContents.insert(g_cursor, &wc, 1);
+            g_fileContents.insert(g_cursor, (const char *)&wParam, 1);
             g_cursor++;
             break;
         }
@@ -413,15 +405,13 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
             int selectionEnd = std::max(g_cursor, g_selection);
 
             HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, selectionEnd - selectionStart + 1);
-            char* ascii = (char *)GlobalLock(global);
-            for (int i = selectionStart; i < selectionEnd; i++) {
-                ascii[i - selectionStart] = (char)g_fileContents[i];
-            }
+            char* buffer = (char *)GlobalLock(global);
+            strncpy(buffer, &g_fileContents[selectionStart], selectionEnd - selectionStart);
             GlobalUnlock(global);
 
             OpenClipboard(hwnd);
             EmptyClipboard();
-            SetClipboardData(CF_TEXT, ascii);
+            SetClipboardData(CF_TEXT, global);
             CloseClipboard();
 
             return false;
@@ -441,27 +431,21 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
                 if (NULL != text) {
                     // Now we paste
 
-                    wchar_t* wtext = (wchar_t*)calloc(strlen(text) + 1, sizeof * wtext);
-                    for (int i = 0; i < strlen(text); i++)
-                        wtext[i] = (wchar_t)text[i];
-
                     if (g_selection >= 0) {
                         int selectionStart = std::min(g_cursor, g_selection);
                         int selectionEnd = std::max(g_cursor, g_selection);
 
                         g_fileContents.replace(
                             selectionStart, selectionEnd - selectionStart,
-                            wtext, wcslen(wtext));
+                            text, strlen(text));
 
                         g_cursor = std::max(g_cursor, g_selection);
                         g_selection = -1;
                     }
                     else {
-                        g_fileContents.insert(g_cursor, wtext, wcslen(wtext));
-                        g_cursor += wcslen(wtext);
+                        g_fileContents.insert(g_cursor, text, strlen(text));
+                        g_cursor += strlen(text);
                     }
-
-                    free(wtext);
 
                     GlobalUnlock(hGlobal);
                 }
