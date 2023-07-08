@@ -14,6 +14,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <tchar.h>
 
 #include <stdio.h>
 #include <assert.h>
@@ -30,10 +31,24 @@ void AppendUtf16Char(const wchar_t* buffer, size_t length);
  */
 void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
 
+#define FATALW(_where) do { if ( _Fatal(TEXT(_where)) ) DebugBreak(); exit(1); } while (0)
+#define FATAL()        do { if ( _Fatal(NULL)         ) DebugBreak(); exit(1); } while (0)
+
+/* Used to crash the program. Will print out result of GetLastError() and give a (somewhat) meaningful message. */
+bool _Fatal(const TCHAR *);
+
 std::string g_fileContents;
 /*Cursor in between this index of g_fileContents and the char before it.*/
 int g_cursor = 0;
 int g_selection = -1;
+
+// Pipe ends to communicate with cmd.exe
+HANDLE g_stdinWrite, g_stdoutRead, g_stderrRead;
+
+HWND g_mainWindow;
+
+constexpr size_t CONSOLE_OUTPUT_BUFFER_SIZE = 1024;
+char g_consoleOutput[CONSOLE_OUTPUT_BUFFER_SIZE];
 
 HFONT g_editorFont;
 
@@ -44,7 +59,6 @@ enum ButtonControlIdentifier {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
 {
-
     // Register the window class.
     const wchar_t CLASS_NAME[] = L"Sample Window Class";
 
@@ -63,7 +77,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     // Create the window.
 
-    HWND hwnd = CreateWindowEx(
+    g_mainWindow = CreateWindowEx(
         0,                              // Optional window styles.
         CLASS_NAME,                     // Window class
         L"My jankey text editor",    // Window text
@@ -84,7 +98,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
         10, 400,
         80, 30,
-        hwnd,
+        g_mainWindow,
         (HMENU)SAVE_BUTTON,
         hInstance,
         NULL
@@ -96,7 +110,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
         100, 400,
         80, 30,
-        hwnd,
+        g_mainWindow,
         (HMENU)OPEN_BUTTON,
         hInstance,
         NULL
@@ -118,14 +132,58 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     SendMessage(openFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
     SendMessage(saveFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
 
-    if (hwnd == NULL)
-    {
-        return 0;
+    HANDLE stdinRead;
+    HANDLE stdoutWrite;
+    HANDLE stderrWrite;
+
+    int couldCreate = -1;
+
+    constexpr size_t PIPE_SIZE = 1024;
+
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+
+    sa.nLength = sizeof sa;
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = true;
+
+    if (!CreatePipe(&stdinRead, &g_stdinWrite, &sa, PIPE_SIZE)) FATALW("Pipe stdin");
+    if (!CreatePipe(&g_stdoutRead, &stdoutWrite, &sa, PIPE_SIZE)) FATALW("Pipe stdout");
+    if (!CreatePipe(&g_stderrRead, &stderrWrite, &sa, PIPE_SIZE)) FATALW("Pipe stderr");
+
+    STARTUPINFO si;
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = stdinRead;
+    si.hStdOutput = stdoutWrite;
+    si.hStdError = stderrWrite;
+
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof pi);
+
+    if (!CreateProcess(
+            TEXT("C:\\Windows\\System32\\cmd.exe"), NULL,
+            NULL, NULL, // process, thread attributes
+            true, // inherit handles
+            CREATE_NO_WINDOW, // creation flags
+            NULL, // string of environment variables
+            NULL, // working directory, NULL means inherit from this process
+            &si, // [in] startup info
+            &pi // [out] process info
+            ))
+        FATALW("Create cmd.exe");
+
+    // our code is too fast even for cmd.exe
+
+    memset(g_consoleOutput, 0, CONSOLE_OUTPUT_BUFFER_SIZE);
+    int bytesRead;
+    // just get the console prompt to show to the screen for now
+    if (!ReadFile(g_stdoutRead, (void*)g_consoleOutput, CONSOLE_OUTPUT_BUFFER_SIZE, (LPDWORD)&bytesRead, NULL)) {
+        FATALW("Read from subprocess cmd.exe");
     }
 
-    ShowWindow(hwnd, nCmdShow);
-
-    // Run the message loop.
+    ShowWindow(g_mainWindow, nCmdShow);
 
     MSG msg = { };
     while (GetMessage(&msg, NULL, 0, 0) > 0)
@@ -149,59 +207,70 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        HBRUSH brush = CreateSolidBrush(RGB(255, 0x0, 0x0));
 
-        FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
+        // we'll try reading from the cmd.exe stdout buffer
+        RECT rect;
+        GetClientRect(hwnd, &rect);
+        SelectFont(hdc, g_editorFont);
+        DrawTextA(hdc, g_consoleOutput, -1, &rect, DT_TOP | DT_LEFT);
 
-        { // draw text
-            RECT rect;
-
-            GetWindowRect(hwnd, &rect);
-            int windowWidth = rect.right - rect.left;
-            int windowHeight = rect.bottom - rect.top;
-
-            rect.left = rect.top = 0;
-            rect.right = windowWidth;
-            rect.bottom = windowHeight;
-
-            SelectFont(hdc, g_editorFont);
-
-            DrawTextA(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
-        }
-
-        { // draw cursor
-            int x, y, textHeight;
-            GetCursorPosition(hdc, g_cursor, &x, &y, &textHeight);
-            constexpr int CURSOR_WIDTH_PX = 2;
-            RECT cursorRect;
-
-            cursorRect.left = x;
-            cursorRect.right = x + CURSOR_WIDTH_PX;
-            cursorRect.bottom = y;
-            cursorRect.top = y - textHeight;
-
-            FillRect(hdc, &cursorRect, brush);
-        }
-
-        if (g_selection >= 0) {
-            HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
-
-            int x, y, textHeight;
-            GetCursorPosition(hdc, g_selection, &x, &y, &textHeight);
-            constexpr int CURSOR_WIDTH_PX = 2;
-            RECT selectionRect;
-
-            selectionRect.left = x;
-            selectionRect.right = x + CURSOR_WIDTH_PX;
-            selectionRect.bottom = y;
-            selectionRect.top = y - textHeight;
-
-            FillRect(hdc, &selectionRect, selectBrush);
-            DeleteObject(selectBrush);
-        }
-
-        DeleteObject(brush);
         EndPaint(hwnd, &ps);
+
+        //PAINTSTRUCT ps;
+        //HDC hdc = BeginPaint(hwnd, &ps);
+        //HBRUSH brush = CreateSolidBrush(RGB(255, 0x0, 0x0));
+
+        //FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
+
+        //{ // draw text
+        //    RECT rect;
+
+        //    GetWindowRect(hwnd, &rect);
+        //    int windowWidth = rect.right - rect.left;
+        //    int windowHeight = rect.bottom - rect.top;
+
+        //    rect.left = rect.top = 0;
+        //    rect.right = windowWidth;
+        //    rect.bottom = windowHeight;
+
+        //    SelectFont(hdc, g_editorFont);
+
+        //    DrawTextA(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
+        //}
+
+        //{ // draw cursor
+        //    int x, y, textHeight;
+        //    GetCursorPosition(hdc, g_cursor, &x, &y, &textHeight);
+        //    constexpr int CURSOR_WIDTH_PX = 2;
+        //    RECT cursorRect;
+
+        //    cursorRect.left = x;
+        //    cursorRect.right = x + CURSOR_WIDTH_PX;
+        //    cursorRect.bottom = y;
+        //    cursorRect.top = y - textHeight;
+
+        //    FillRect(hdc, &cursorRect, brush);
+        //}
+
+        //if (g_selection >= 0) {
+        //    HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
+
+        //    int x, y, textHeight;
+        //    GetCursorPosition(hdc, g_selection, &x, &y, &textHeight);
+        //    constexpr int CURSOR_WIDTH_PX = 2;
+        //    RECT selectionRect;
+
+        //    selectionRect.left = x;
+        //    selectionRect.right = x + CURSOR_WIDTH_PX;
+        //    selectionRect.bottom = y;
+        //    selectionRect.top = y - textHeight;
+
+        //    FillRect(hdc, &selectionRect, selectBrush);
+        //    DeleteObject(selectBrush);
+        //}
+
+        //DeleteObject(brush);
+        //EndPaint(hwnd, &ps);
 
         return 0;
     }
@@ -493,4 +562,35 @@ void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight
     *x = cursorColumnIdx * size.cx;
     *y = (cursorLineIdx + 1) * size.cy;
     *textHeight = size.cy;
+}
+
+bool _Fatal(const TCHAR *where)
+{
+    DWORD error = GetLastError();
+
+    constexpr size_t MESSAGE_LEN = 1024;
+    TCHAR message[MESSAGE_LEN];
+    memset(message, 0, sizeof message);
+
+    constexpr size_t ERROR_PORTION_LEN = 64;
+    C_ASSERT(ERROR_PORTION_LEN < MESSAGE_LEN);
+    _sntprintf(message, ERROR_PORTION_LEN, TEXT("Received system error code 0x%.4X (%d):\n"), error, error);
+
+    LPTSTR systemMessage;
+    FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        0, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&systemMessage, 0, NULL
+    );
+
+    _tcsncat(message, systemMessage, MESSAGE_LEN);
+    _tcsncat(message, TEXT("\nWould you like to debug?"), MESSAGE_LEN);
+
+    if (NULL == where)
+        where = TEXT("Fatal Error Ocurred");
+
+    int chosen = MessageBox(g_mainWindow, message, where, MB_YESNO | MB_ICONERROR | MB_SYSTEMMODAL);
+
+    LocalFree(systemMessage);
+
+    return IDYES == chosen;
 }
