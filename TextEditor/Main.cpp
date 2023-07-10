@@ -1,15 +1,10 @@
-#ifndef UNICODE
-#define UNICODE
-#endif
-
 // Without this mess, our app will look like it's from Windows 95
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#include "TextEditor.h"
+
 #include <winbase.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -30,32 +25,13 @@ void AppendUtf16Char(const wchar_t* buffer, size_t length);
 /* xy is baseline xy at which to draw the cursor.
  */
 void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
-void GetCursorConsolePosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
-
-#define FATALW(_where) do { if ( _Fatal(TEXT(_where)) ) DebugBreak(); exit(1); } while (0)
-#define FATAL()        do { if ( _Fatal(NULL)         ) DebugBreak(); exit(1); } while (0)
-
-DWORD ConsoleReadThread(void *argument);
-
-/* Used to crash the program. Will print out result of GetLastError() and give a (somewhat) meaningful message. */
-bool _Fatal(const TCHAR *);
 
 std::string g_fileContents;
 /*Cursor in between this index of g_fileContents and the char before it.*/
 int g_cursor = 0;
 int g_selection = -1;
 
-// Pipe ends to communicate with cmd.exe
-HANDLE g_stdinWrite, g_stdoutRead, g_stderrRead;
-
 HWND g_mainWindow;
-
-void SendConsoleInputToStdin(void);
-
-constexpr size_t CONSOLE_OUTPUT_BUFFER_SIZE = 1024;
-// This buffer should probably be in a mutex, but I don't know how to do that since the only time it's read from is in WM_PAINT of the console window.
-char g_consoleOutput[CONSOLE_OUTPUT_BUFFER_SIZE];
-std::string g_consoleInput;
 
 HFONT g_editorFont;
 
@@ -67,15 +43,15 @@ enum ButtonControlIdentifier {
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
 {
     // Register the window class.
-    const wchar_t CLASS_NAME[] = L"Sample Window Class";
-
     WNDCLASS wc = { };
 
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = CLASS_NAME;
+    wc.lpszClassName = TEXT("MainWindow");
 
     RegisterClass(&wc);
+
+    RegisterConsoleWindowClass();
 
     INITCOMMONCONTROLSEX commonControls = {};
     commonControls.dwSize = sizeof commonControls;
@@ -86,7 +62,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     g_mainWindow = CreateWindowEx(
         0,                              // Optional window styles.
-        CLASS_NAME,                     // Window class
+        TEXT("MainWindow"),                     // Window class
         L"My jankey text editor",    // Window text
         WS_OVERLAPPEDWINDOW,            // Window style
 
@@ -97,6 +73,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         NULL,       // Menu
         hInstance,  // Instance handle
         NULL        // Additional application data
+    );
+
+    HWND _consoleWindow = CreateWindow(
+        CONSOLE_WINDOW_CLASS,
+        TEXT("Console Window"),
+        WS_VISIBLE | WS_CHILD,
+        0, 430,
+        800, 300,
+        g_mainWindow,
+        NULL,
+        hInstance,
+        NULL
     );
 
     HWND saveFileButton = CreateWindow(
@@ -139,62 +127,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     SendMessage(openFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
     SendMessage(saveFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
 
-    HANDLE stdinRead;
-    HANDLE stdoutWrite;
-    HANDLE stderrWrite;
-
-    int couldCreate = -1;
-
-    constexpr size_t PIPE_SIZE = 1024;
-
-    SECURITY_ATTRIBUTES sa;
-    memset(&sa, 0, sizeof sa);
-
-    sa.nLength = sizeof sa;
-    sa.lpSecurityDescriptor = NULL;
-    sa.bInheritHandle = true;
-
-    if (!CreatePipe(&stdinRead, &g_stdinWrite, &sa, PIPE_SIZE)) FATALW("Pipe stdin");
-    if (!CreatePipe(&g_stdoutRead, &stdoutWrite, &sa, PIPE_SIZE)) FATALW("Pipe stdout");
-    if (!CreatePipe(&g_stderrRead, &stderrWrite, &sa, PIPE_SIZE)) FATALW("Pipe stderr");
-
-    STARTUPINFO si;
-    memset(&si, 0, sizeof si);
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = stdinRead;
-    si.hStdOutput = stdoutWrite;
-    si.hStdError = stderrWrite;
-
-    PROCESS_INFORMATION pi;
-    memset(&pi, 0, sizeof pi);
-
-    if (!CreateProcess(
-            TEXT("C:\\Windows\\System32\\cmd.exe"), NULL,
-            NULL, NULL, // process, thread attributes
-            true, // inherit handles
-            CREATE_NO_WINDOW, // creation flags
-            NULL, // string of environment variables
-            NULL, // working directory, NULL means inherit from this process
-            &si, // [in] startup info
-            &pi // [out] process info
-            ))
-        FATALW("Create cmd.exe");
-
-    // Let us create a thread that spends its time blocking, waiting to read from cmd.exe
-    HANDLE consoleThread;
-    if (NULL == (consoleThread = CreateThread(
-            NULL, // security attributes
-            0, // stack size - 0 = default
-            ConsoleReadThread, // procedure
-            NULL, // procedure argument
-            0, // flags
-            NULL // thread id
-            )))
-        FATALW("Create console thread");
-
-    memset(g_consoleOutput, 0, CONSOLE_OUTPUT_BUFFER_SIZE);
-
     ShowWindow(g_mainWindow, nCmdShow);
 
     MSG msg = { };
@@ -217,79 +149,62 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_PAINT:
     {
+
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
+        HBRUSH brush = CreateSolidBrush(RGB(255, 0x0, 0x0));
 
-        // we'll try reading from the cmd.exe stdout buffer
-        RECT rect;
-        GetClientRect(hwnd, &rect);
-        SelectFont(hdc, g_editorFont);
+        FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
 
-        DrawTextA(hdc, g_consoleOutput, -1, &rect, DT_TOP | DT_LEFT);
+        { // draw text
+            RECT rect;
 
-        int x, y, height;
-        GetCursorConsolePosition(hdc, strlen(g_consoleOutput), &x, &y, &height);
-        rect.left = x;
-        rect.top = y - height;
-        DrawTextA(hdc, g_consoleInput.c_str(), -1, &rect, DT_TOP | DT_LEFT);
+            GetWindowRect(hwnd, &rect);
+            int windowWidth = rect.right - rect.left;
+            int windowHeight = rect.bottom - rect.top;
 
+            rect.left = rect.top = 0;
+            rect.right = windowWidth;
+            rect.bottom = windowHeight;
+
+            SelectFont(hdc, g_editorFont);
+
+            DrawTextA(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
+        }
+
+        { // draw cursor
+            int x, y, textHeight;
+            GetCursorPosition(hdc, g_cursor, &x, &y, &textHeight);
+            constexpr int CURSOR_WIDTH_PX = 2;
+            RECT cursorRect;
+
+            cursorRect.left = x;
+            cursorRect.right = x + CURSOR_WIDTH_PX;
+            cursorRect.bottom = y;
+            cursorRect.top = y - textHeight;
+
+            FillRect(hdc, &cursorRect, brush);
+        }
+
+        if (g_selection >= 0) {
+            HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
+
+            int x, y, textHeight;
+            GetCursorPosition(hdc, g_selection, &x, &y, &textHeight);
+            constexpr int CURSOR_WIDTH_PX = 2;
+            RECT selectionRect;
+
+            selectionRect.left = x;
+            selectionRect.right = x + CURSOR_WIDTH_PX;
+            selectionRect.bottom = y;
+            selectionRect.top = y - textHeight;
+
+            FillRect(hdc, &selectionRect, selectBrush);
+            DeleteObject(selectBrush);
+        }
+
+        DeleteObject(brush);
         EndPaint(hwnd, &ps);
-
-        //PAINTSTRUCT ps;
-        //HDC hdc = BeginPaint(hwnd, &ps);
-        //HBRUSH brush = CreateSolidBrush(RGB(255, 0x0, 0x0));
-
-        //FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
-
-        //{ // draw text
-        //    RECT rect;
-
-        //    GetWindowRect(hwnd, &rect);
-        //    int windowWidth = rect.right - rect.left;
-        //    int windowHeight = rect.bottom - rect.top;
-
-        //    rect.left = rect.top = 0;
-        //    rect.right = windowWidth;
-        //    rect.bottom = windowHeight;
-
-        //    SelectFont(hdc, g_editorFont);
-
-        //    DrawTextA(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
-        //}
-
-        //{ // draw cursor
-        //    int x, y, textHeight;
-        //    GetCursorPosition(hdc, g_cursor, &x, &y, &textHeight);
-        //    constexpr int CURSOR_WIDTH_PX = 2;
-        //    RECT cursorRect;
-
-        //    cursorRect.left = x;
-        //    cursorRect.right = x + CURSOR_WIDTH_PX;
-        //    cursorRect.bottom = y;
-        //    cursorRect.top = y - textHeight;
-
-        //    FillRect(hdc, &cursorRect, brush);
-        //}
-
-        //if (g_selection >= 0) {
-        //    HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
-
-        //    int x, y, textHeight;
-        //    GetCursorPosition(hdc, g_selection, &x, &y, &textHeight);
-        //    constexpr int CURSOR_WIDTH_PX = 2;
-        //    RECT selectionRect;
-
-        //    selectionRect.left = x;
-        //    selectionRect.right = x + CURSOR_WIDTH_PX;
-        //    selectionRect.bottom = y;
-        //    selectionRect.top = y - textHeight;
-
-        //    FillRect(hdc, &selectionRect, selectBrush);
-        //    DeleteObject(selectBrush);
-        //}
-
-        //DeleteObject(brush);
-        //EndPaint(hwnd, &ps);
 
         return 0;
     }
@@ -362,23 +277,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_LBUTTONDOWN:
+    {
+        SetFocus(hwnd);
+        break;
+    }
+
     case WM_CHAR:
     {
-        char charParam = (char)wParam;
-        switch (charParam) {
-        case '\b':
-            g_consoleInput.pop_back();
-            break;
-        case '\r':
-            g_consoleInput.append("\r\n");
-            SendConsoleInputToStdin();
-            g_consoleInput.clear();
-            InvalidateRect(hwnd, NULL, true);
-            break;
-        default:
-            g_consoleInput.push_back(charParam);
-        }
-
         constexpr char ESCAPE = 0x1B;
         switch (wParam)
         {
@@ -598,43 +504,6 @@ void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight
     *textHeight = size.cy;
 }
 
-void GetCursorConsolePosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight)
-{
-    const wchar_t* fullBlock = L"\x2588";
-
-    SIZE size;
-
-    if (!GetTextExtentPoint32(
-        hdc,
-        fullBlock,
-        wcslen(fullBlock),
-        &size)) {
-        DebugBreak();
-        abort();
-    }
-
-    // TODO test this following part of the function
-
-    int cursorLineIdx = 0;
-    int lineStart = 0;
-
-    for (int i = 0; i <= strlen(g_consoleOutput); i++) {
-        if (i > 0 && g_consoleOutput[i - 1] == L'\n') {
-            lineStart = i;
-            cursorLineIdx++;
-        }
-
-        if (i == cursorIndex)
-            break;
-    }
-
-    int cursorColumnIdx = cursorIndex - lineStart;
-
-    *x = cursorColumnIdx * size.cx;
-    *y = (cursorLineIdx + 1) * size.cy;
-    *textHeight = size.cy;
-}
-
 bool _Fatal(const TCHAR *where)
 {
     DWORD error = GetLastError();
@@ -646,7 +515,7 @@ bool _Fatal(const TCHAR *where)
     constexpr size_t ERROR_PORTION_LEN = 64;
     C_ASSERT(ERROR_PORTION_LEN < MESSAGE_LEN);
     _sntprintf(message, ERROR_PORTION_LEN, TEXT("Received system error code 0x%.4X (%d):\n"), error, error);
-
+ 
     LPTSTR systemMessage;
     FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
@@ -664,32 +533,4 @@ bool _Fatal(const TCHAR *where)
     LocalFree(systemMessage);
 
     return IDYES == chosen;
-}
-
-DWORD ConsoleReadThread(void* argument)
-{
-    if (NULL != argument)
-        FATALW("ConsoleReadThread expected argument to be NULL");
-
-    char localReadBuffer[CONSOLE_OUTPUT_BUFFER_SIZE];
-    DWORD bytesRead;
-
-    while (true) {
-        if (!ReadFile(g_stdoutRead, localReadBuffer, CONSOLE_OUTPUT_BUFFER_SIZE, &bytesRead, NULL))
-            FATALW("ConsoleReadThread read console stdout");
-
-        size_t consoleOutputLength = strlen(g_consoleOutput);
-        memcpy(&g_consoleOutput[consoleOutputLength], localReadBuffer, bytesRead);
-
-        InvalidateRect(g_mainWindow, NULL, true);
-    }
-
-    return EXIT_SUCCESS;
-}
-
-void SendConsoleInputToStdin(void)
-{
-    DWORD bytesWritten;
-    if (!WriteFile(g_stdinWrite, g_consoleInput.c_str(), g_consoleInput.length(), &bytesWritten, NULL))
-        FATALW("Send console input to stdin WriteFile");
 }
