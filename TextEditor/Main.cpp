@@ -30,9 +30,12 @@ void AppendUtf16Char(const wchar_t* buffer, size_t length);
 /* xy is baseline xy at which to draw the cursor.
  */
 void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
+void GetCursorConsolePosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
 
 #define FATALW(_where) do { if ( _Fatal(TEXT(_where)) ) DebugBreak(); exit(1); } while (0)
 #define FATAL()        do { if ( _Fatal(NULL)         ) DebugBreak(); exit(1); } while (0)
+
+DWORD ConsoleReadThread(void *argument);
 
 /* Used to crash the program. Will print out result of GetLastError() and give a (somewhat) meaningful message. */
 bool _Fatal(const TCHAR *);
@@ -47,8 +50,12 @@ HANDLE g_stdinWrite, g_stdoutRead, g_stderrRead;
 
 HWND g_mainWindow;
 
+void SendConsoleInputToStdin(void);
+
 constexpr size_t CONSOLE_OUTPUT_BUFFER_SIZE = 1024;
+// This buffer should probably be in a mutex, but I don't know how to do that since the only time it's read from is in WM_PAINT of the console window.
 char g_consoleOutput[CONSOLE_OUTPUT_BUFFER_SIZE];
+std::string g_consoleInput;
 
 HFONT g_editorFont;
 
@@ -174,14 +181,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             ))
         FATALW("Create cmd.exe");
 
-    // our code is too fast even for cmd.exe
+    // Let us create a thread that spends its time blocking, waiting to read from cmd.exe
+    HANDLE consoleThread;
+    if (NULL == (consoleThread = CreateThread(
+            NULL, // security attributes
+            0, // stack size - 0 = default
+            ConsoleReadThread, // procedure
+            NULL, // procedure argument
+            0, // flags
+            NULL // thread id
+            )))
+        FATALW("Create console thread");
 
     memset(g_consoleOutput, 0, CONSOLE_OUTPUT_BUFFER_SIZE);
-    int bytesRead;
-    // just get the console prompt to show to the screen for now
-    if (!ReadFile(g_stdoutRead, (void*)g_consoleOutput, CONSOLE_OUTPUT_BUFFER_SIZE, (LPDWORD)&bytesRead, NULL)) {
-        FATALW("Read from subprocess cmd.exe");
-    }
 
     ShowWindow(g_mainWindow, nCmdShow);
 
@@ -212,7 +224,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         RECT rect;
         GetClientRect(hwnd, &rect);
         SelectFont(hdc, g_editorFont);
+
         DrawTextA(hdc, g_consoleOutput, -1, &rect, DT_TOP | DT_LEFT);
+
+        int x, y, height;
+        GetCursorConsolePosition(hdc, strlen(g_consoleOutput), &x, &y, &height);
+        rect.left = x;
+        rect.top = y - height;
+        DrawTextA(hdc, g_consoleInput.c_str(), -1, &rect, DT_TOP | DT_LEFT);
 
         EndPaint(hwnd, &ps);
 
@@ -345,6 +364,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_CHAR:
     {
+        char charParam = (char)wParam;
+        switch (charParam) {
+        case '\b':
+            g_consoleInput.pop_back();
+            break;
+        case '\r':
+            g_consoleInput.append("\r\n");
+            SendConsoleInputToStdin();
+            g_consoleInput.clear();
+            InvalidateRect(hwnd, NULL, true);
+            break;
+        default:
+            g_consoleInput.push_back(charParam);
+        }
+
         constexpr char ESCAPE = 0x1B;
         switch (wParam)
         {
@@ -564,6 +598,43 @@ void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight
     *textHeight = size.cy;
 }
 
+void GetCursorConsolePosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight)
+{
+    const wchar_t* fullBlock = L"\x2588";
+
+    SIZE size;
+
+    if (!GetTextExtentPoint32(
+        hdc,
+        fullBlock,
+        wcslen(fullBlock),
+        &size)) {
+        DebugBreak();
+        abort();
+    }
+
+    // TODO test this following part of the function
+
+    int cursorLineIdx = 0;
+    int lineStart = 0;
+
+    for (int i = 0; i <= strlen(g_consoleOutput); i++) {
+        if (i > 0 && g_consoleOutput[i - 1] == L'\n') {
+            lineStart = i;
+            cursorLineIdx++;
+        }
+
+        if (i == cursorIndex)
+            break;
+    }
+
+    int cursorColumnIdx = cursorIndex - lineStart;
+
+    *x = cursorColumnIdx * size.cx;
+    *y = (cursorLineIdx + 1) * size.cy;
+    *textHeight = size.cy;
+}
+
 bool _Fatal(const TCHAR *where)
 {
     DWORD error = GetLastError();
@@ -593,4 +664,32 @@ bool _Fatal(const TCHAR *where)
     LocalFree(systemMessage);
 
     return IDYES == chosen;
+}
+
+DWORD ConsoleReadThread(void* argument)
+{
+    if (NULL != argument)
+        FATALW("ConsoleReadThread expected argument to be NULL");
+
+    char localReadBuffer[CONSOLE_OUTPUT_BUFFER_SIZE];
+    DWORD bytesRead;
+
+    while (true) {
+        if (!ReadFile(g_stdoutRead, localReadBuffer, CONSOLE_OUTPUT_BUFFER_SIZE, &bytesRead, NULL))
+            FATALW("ConsoleReadThread read console stdout");
+
+        size_t consoleOutputLength = strlen(g_consoleOutput);
+        memcpy(&g_consoleOutput[consoleOutputLength], localReadBuffer, bytesRead);
+
+        InvalidateRect(g_mainWindow, NULL, true);
+    }
+
+    return EXIT_SUCCESS;
+}
+
+void SendConsoleInputToStdin(void)
+{
+    DWORD bytesWritten;
+    if (!WriteFile(g_stdinWrite, g_consoleInput.c_str(), g_consoleInput.length(), &bytesWritten, NULL))
+        FATALW("Send console input to stdin WriteFile");
 }
