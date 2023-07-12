@@ -3,7 +3,7 @@
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-#include "TextEditor.h"
+#include "texteditor.h"
 
 #include <winbase.h>
 #include <windowsx.h>
@@ -51,7 +51,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
 
     RegisterClass(&wc);
 
-    RegisterConsoleWindowClass();
+    register_console_window_class();
+    register_file_tree_window_class();
 
     INITCOMMONCONTROLSEX commonControls = {};
     commonControls.dwSize = sizeof commonControls;
@@ -81,6 +82,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         WS_VISIBLE | WS_CHILD,
         0, 430,
         800, 300,
+        g_mainWindow,
+        NULL,
+        hInstance,
+        NULL
+    );
+
+    HWND _file_tree_window = CreateWindow(
+        FILE_TREE_WINDOW_CLASS,
+        TEXT("File tree window"),
+        WS_VISIBLE | WS_CHILD,
+        0, 0, // x y
+        800, 600, // width height
         g_mainWindow,
         NULL,
         hInstance,
@@ -502,35 +515,4 @@ void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight
     *x = cursorColumnIdx * size.cx;
     *y = (cursorLineIdx + 1) * size.cy;
     *textHeight = size.cy;
-}
-
-bool _Fatal(const TCHAR *where)
-{
-    DWORD error = GetLastError();
-
-    constexpr size_t MESSAGE_LEN = 1024;
-    TCHAR message[MESSAGE_LEN];
-    memset(message, 0, sizeof message);
-
-    constexpr size_t ERROR_PORTION_LEN = 64;
-    C_ASSERT(ERROR_PORTION_LEN < MESSAGE_LEN);
-    _sntprintf(message, ERROR_PORTION_LEN, TEXT("Received system error code 0x%.4X (%d):\n"), error, error);
- 
-    LPTSTR systemMessage;
-    FormatMessage(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        0, error, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&systemMessage, 0, NULL
-    );
-
-    _tcsncat(message, systemMessage, MESSAGE_LEN);
-    _tcsncat(message, TEXT("\nWould you like to debug?"), MESSAGE_LEN);
-
-    if (NULL == where)
-        where = TEXT("Fatal Error Ocurred");
-
-    int chosen = MessageBox(g_mainWindow, message, where, MB_YESNO | MB_ICONERROR | MB_SYSTEMMODAL);
-
-    LocalFree(systemMessage);
-
-    return IDYES == chosen;
 }
