@@ -131,7 +131,7 @@
   <ItemGroup>
     <ClCompile Include="console.c" />
     <ClCompile Include="filetree.c" />
-    <ClCompile Include="main.cpp" />
+    <ClCompile Include="main.c" />
     <ClCompile Include="util.c" />
   </ItemGroup>
   <ItemGroup>

@@ -6,34 +6,35 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include "texteditor.h"
 
 #include <winbase.h>
+#include <winuser.h>
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <tchar.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <assert.h>
 
-#include <string>
-#include <utility>
+#define CURSOR_WIDTH_PX 1
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+LRESULT CALLBACK window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
-bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState);
-void AppendUtf16Char(const wchar_t* buffer, size_t length);
+bool handle_key_press(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState);
 
 /* xy is baseline xy at which to draw the cursor.
  */
-void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
+void get_cursor_position(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight);
 
-std::string g_fileContents;
+#define MAX_FILE 0x8000
+char file_contents[MAX_FILE] = { 0 };
+size_t file_len = 0;
+
 /*Cursor in between this index of g_fileContents and the char before it.*/
 int g_cursor = 0;
 int g_selection = -1;
 
-HWND g_mainWindow;
-
-HFONT g_editorFont;
+HFONT editor_font;
 
 enum ButtonControlIdentifier {
     SAVE_BUTTON,
@@ -43,9 +44,9 @@ enum ButtonControlIdentifier {
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow)
 {
     // Register the window class.
-    WNDCLASS wc = { };
+    WNDCLASS wc = { 0 };
 
-    wc.lpfnWndProc = WindowProc;
+    wc.lpfnWndProc = window_proc;
     wc.hInstance = hInstance;
     wc.lpszClassName = TEXT("MainWindow");
 
@@ -54,15 +55,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     register_console_window_class();
     register_file_tree_window_class();
 
-    INITCOMMONCONTROLSEX commonControls = {};
+    INITCOMMONCONTROLSEX commonControls = { 0 };
     commonControls.dwSize = sizeof commonControls;
     commonControls.dwICC = (DWORD)ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&commonControls);
 
     // Create the window.
 
-    g_mainWindow = CreateWindowEx(
-        0,                              // Optional window styles.
+    HWND master_window = CreateWindow(
         TEXT("MainWindow"),                     // Window class
         L"My jankey text editor",    // Window text
         WS_OVERLAPPEDWINDOW,            // Window style
@@ -76,73 +76,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         NULL        // Additional application data
     );
 
-    HWND _consoleWindow = CreateWindow(
-        CONSOLE_WINDOW_CLASS,
-        TEXT("Console Window"),
-        WS_VISIBLE | WS_CHILD,
-        0, 430,
-        800, 300,
-        g_mainWindow,
-        NULL,
-        hInstance,
-        NULL
-    );
+    ShowWindow(master_window, nCmdShow);
 
-    HWND _file_tree_window = CreateWindow(
-        FILE_TREE_WINDOW_CLASS,
-        TEXT("File tree window"),
-        WS_VISIBLE | WS_CHILD,
-        0, 0, // x y
-        800, 600, // width height
-        g_mainWindow,
-        NULL,
-        hInstance,
-        NULL
-    );
-
-    HWND saveFileButton = CreateWindow(
-        L"BUTTON",
-        L"Save File...",
-        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-        10, 400,
-        80, 30,
-        g_mainWindow,
-        (HMENU)SAVE_BUTTON,
-        hInstance,
-        NULL
-    );
-
-    HWND openFileButton = CreateWindow(
-        L"BUTTON",
-        L"Open File...",
-        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-        100, 400,
-        80, 30,
-        g_mainWindow,
-        (HMENU)OPEN_BUTTON,
-        hInstance,
-        NULL
-    );
-
-    g_editorFont = CreateFont(
-        0, 0, // height, width
-        0, 0, // escapement, orientation
-        FW_DONTCARE,
-        false, false, false, // italic, underline, strikeout
-        ANSI_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY,
-        FF_DONTCARE,
-        L"Consolas"
-    );
-
-    SendMessage(openFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
-    SendMessage(saveFileButton, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
-
-    ShowWindow(g_mainWindow, nCmdShow);
-
-    MSG msg = { };
+    MSG msg = { 0 };
     while (GetMessage(&msg, NULL, 0, 0) > 0)
     {
         TranslateMessage(&msg);
@@ -152,10 +88,78 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     return 0;
 }
 
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     switch (uMsg)
     {
+    case WM_CREATE:
+    {
+        editor_font = CreateFont(
+            0, 0, // height, width
+            0, 0, // escapement, orientation
+            FW_DONTCARE,
+            false, false, false, // italic, underline, strikeout
+            ANSI_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY,
+            FF_DONTCARE,
+            L"Consolas"
+        );
+
+        HWND save_file_button = CreateWindow(
+            TEXT("BUTTON"),
+            TEXT("Save File..."),
+            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
+            10, 400,
+            80, 30,
+            hwnd,
+            (HMENU)SAVE_BUTTON,
+            (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE),
+            NULL
+        );
+
+        HWND open_file_button = CreateWindow(
+            L"BUTTON",
+            L"Open File...",
+            WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
+            100, 400,
+            80, 30,
+            hwnd,
+            (HMENU)OPEN_BUTTON,
+            (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE),
+            NULL
+        );
+
+        HWND _console_window = CreateWindow(
+            CONSOLE_WINDOW_CLASS,
+            TEXT("Console Window"),
+            WS_VISIBLE | WS_CHILD,
+            0, 430,
+            800, 300,
+            hwnd,
+            NULL,
+            (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE),
+            NULL
+        );
+
+        HWND _file_tree_window = CreateWindow(
+            FILE_TREE_WINDOW_CLASS,
+            TEXT("File tree window"),
+            WS_VISIBLE | WS_CHILD,
+            0, 0, // x y
+            800, 600, // width height
+            hwnd,
+            NULL,
+            (HINSTANCE)GetWindowLongPtr(hwnd, GWLP_HINSTANCE),
+            NULL
+        );
+
+        SendMessage(open_file_button, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
+        SendMessage(save_file_button, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), true);
+
+        break;
+    }
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -180,15 +184,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             rect.right = windowWidth;
             rect.bottom = windowHeight;
 
-            SelectFont(hdc, g_editorFont);
+            SelectFont(hdc, editor_font);
 
-            DrawTextA(hdc, g_fileContents.c_str(), -1, &rect, DT_TOP | DT_LEFT);
+            DrawTextA(hdc, file_contents, file_len, &rect, DT_TOP | DT_LEFT);
         }
 
         { // draw cursor
             int x, y, textHeight;
-            GetCursorPosition(hdc, g_cursor, &x, &y, &textHeight);
-            constexpr int CURSOR_WIDTH_PX = 2;
+            get_cursor_position(hdc, g_cursor, &x, &y, &textHeight);
             RECT cursorRect;
 
             cursorRect.left = x;
@@ -203,8 +206,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
 
             int x, y, textHeight;
-            GetCursorPosition(hdc, g_selection, &x, &y, &textHeight);
-            constexpr int CURSOR_WIDTH_PX = 2;
+            get_cursor_position(hdc, g_selection, &x, &y, &textHeight);
             RECT selectionRect;
 
             selectionRect.left = x;
@@ -225,8 +227,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
     {
         if (HIWORD(wParam) == BN_CLICKED) {
-            constexpr size_t FILE_MAX_LEN = 256;
-            char selectedFile[FILE_MAX_LEN];
+            char selectedFile[MAX_PATH];
             memset(selectedFile, 0, sizeof selectedFile);
 
             OPENFILENAMEA ofn;
@@ -236,15 +237,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             ofn.hwndOwner = hwnd;
             ofn.lpstrFilter = "All Files\0*.*\0";
             ofn.lpstrFile = selectedFile;
-            ofn.nMaxFile = FILE_MAX_LEN;
+            ofn.nMaxFile = MAX_PATH;
             ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
             if (LOWORD(wParam) == SAVE_BUTTON) {
                 if (GetSaveFileNameA(&ofn)) {
                     FILE *f = fopen(selectedFile, "w");
 
-                    size_t written = fwrite(g_fileContents.c_str(), sizeof g_fileContents[0], g_fileContents.length(), f);
-                    assert(written == g_fileContents.length());
+                    size_t written = fwrite(file_contents, sizeof file_contents[0], file_len, f);
+                    assert(written == file_len);
 
                     fclose(f);
 
@@ -256,14 +257,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                     FILE* f;
                     fopen_s(&f, selectedFile, "r");
 
-                    size_t sizeBytes;
+                    size_t size_bytes;
                     fseek(f, 0, SEEK_END);
-                    sizeBytes = ftell(f);
+                    size_bytes = ftell(f);
                     fseek(f, 0, SEEK_SET);
 
-                    g_fileContents.resize(sizeBytes, 0);
+                    assert(size_bytes <= MAX_FILE);
 
-                    size_t read = fread(&g_fileContents[0], sizeof g_fileContents[0], g_fileContents.length(), f);
+                    size_t read = fread(file_contents, sizeof file_contents[0], MAX_FILE, f);
 
                     fclose(f);
 
@@ -281,7 +282,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_KEYDOWN:
     {
-        bool shouldRedraw = HandleKeyPress(hwnd, wParam, lParam);
+        bool shouldRedraw = handle_key_press(hwnd, wParam, lParam);
 
         if (shouldRedraw) {
             InvalidateRect(hwnd, NULL, true);
@@ -298,7 +299,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_CHAR:
     {
-        constexpr char ESCAPE = 0x1B;
+        #define ESCAPE 0x1B
         switch (wParam)
         {
         case '\b':
@@ -307,17 +308,23 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 break;
             }
 
-            const char* deleteEnd = g_fileContents.c_str() + g_cursor;
-            const char* deleteStart = CharPrevA(
-                g_fileContents.c_str(),
-                g_fileContents.c_str() + g_cursor
-            );
+            char *delete_end, *delete_start;
 
-            int removed = deleteEnd - deleteStart;
-            int deleteStartIdx = deleteStart - g_fileContents.c_str();
+            if (g_selection >= 0) {
+                delete_start = &file_contents[min(g_selection, g_cursor)];
+                delete_end = &file_contents[max(g_selection, g_cursor)];
+            }
+            else {
+                delete_end = &file_contents[g_cursor];
+                delete_start = CharPrevA(file_contents, &file_contents[g_cursor]);
+            }
 
-            g_fileContents.erase(deleteStartIdx, removed);
-            g_cursor--;
+            size_t shifted = &file_contents[file_len] - delete_end;
+
+            memmove(delete_start, delete_end, shifted);
+            g_cursor = min(g_selection, g_cursor);
+            g_selection = -1;
+            file_len -= delete_end - delete_start;
         }
         case '\t':
             // handle a tab insertion
@@ -325,10 +332,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         case '\r':
         case '\n':
         {
-            // insert a new line
-            const char lf = '\n';
-            g_fileContents.insert(g_cursor, &lf, 1);
-            g_cursor++;
+            if (file_len < MAX_FILE) {
+                file_len++;
+                file_contents[g_cursor++] = '\n';
+            }
             break;
         }
         case ESCAPE:
@@ -338,8 +345,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             if (!iswprint((wchar_t)wParam)) {
                 break;
             }
-            g_fileContents.insert(g_cursor, (const char *)&wParam, 1);
-            g_cursor++;
+            // TODO utf16 to utf8 conversion
+            file_contents[g_cursor++] = (char)(wchar_t)wParam;
+            file_len++;
             break;
         }
         }
@@ -355,19 +363,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 /*Returns true if should redraw the window.
  */
-bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
+bool handle_key_press(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
 {
-    constexpr short KEYDOWN_MASK = 0x8000;
-
-    constexpr int VK_A = 0x41;
-    constexpr int VK_C = ('c' - 'a') + VK_A;
-    constexpr int VK_V = ('v' - 'a') + VK_A;
+    #define KEYDOWN_MASK ((short)0x8000)
+    #define VK_A ((int)0x41)
+    #define VK_C ((int)(('c' - 'a') + VK_A))
+    #define VK_V ((int)(('v' - 'a') + VK_A))
 
     const int repeatCount = 0xffff & otherState;
     const int scanCode = (0xff0000 & otherState) >> 16;
     const bool isExtended = (0x1000000 & otherState) >> 24;
     const int previousState = (0x80000000 & otherState) >> 31;
-
 
     switch (virtualKeyCode) {
     case VK_LEFT:
@@ -375,18 +381,18 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
         bool shiftPressed = GetKeyState(VK_SHIFT) & KEYDOWN_MASK;
         if (shiftPressed) {
             if (g_selection < 0) {
-                g_selection = std::max(0, g_cursor - 1);
+                g_selection = max(0, g_cursor - 1);
             }
             else {
-                g_selection = std::max(0, g_selection - 1);
+                g_selection = max(0, g_selection - 1);
             }
         }
         else {
             if (g_selection < 0) {
-                g_cursor = std::max(0, g_cursor - 1);
+                g_cursor = max(0, g_cursor - 1);
             }
             else {
-                g_cursor = std::min(g_cursor, g_selection);
+                g_cursor = min(g_cursor, g_selection);
                 g_selection = -1;
             }
         }
@@ -397,18 +403,18 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
         bool shiftPressed = GetKeyState(VK_SHIFT) & KEYDOWN_MASK;
         if (shiftPressed) {
             if (g_selection < 0) {
-                g_selection = std::min(g_cursor + 1, (int)g_fileContents.length());
+                g_selection = min(g_cursor + 1, (int)file_len);
             }
             else {
-                g_selection = std::min(g_selection + 1, (int)g_fileContents.length());
+                g_selection = min(g_selection + 1, (int)file_len);
             }
         }
         else {
             if (g_selection < 0) {
-                g_cursor = std::min(g_cursor + 1, (int)g_fileContents.length());
+                g_cursor = min(g_cursor + 1, (int)file_len);
             }
             else {
-                g_cursor = std::max(g_cursor, g_selection);
+                g_cursor = max(g_cursor, g_selection);
                 g_selection = -1;
             }
         }
@@ -423,12 +429,12 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
                 return false; // without selection, copy does nothing
             }
 
-            int selectionStart = std::min(g_cursor, g_selection);
-            int selectionEnd = std::max(g_cursor, g_selection);
+            int selectionStart = min(g_cursor, g_selection);
+            int selectionEnd = max(g_cursor, g_selection);
 
             HGLOBAL global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, selectionEnd - selectionStart + 1);
             char* buffer = (char *)GlobalLock(global);
-            strncpy(buffer, &g_fileContents[selectionStart], selectionEnd - selectionStart);
+            strncpy(buffer, &file_contents[selectionStart], selectionEnd - selectionStart);
             GlobalUnlock(global);
 
             OpenClipboard(hwnd);
@@ -451,23 +457,7 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
                 const char *text = (const char *)GlobalLock(hGlobal);
 
                 if (NULL != text) {
-                    // Now we paste
-
-                    if (g_selection >= 0) {
-                        int selectionStart = std::min(g_cursor, g_selection);
-                        int selectionEnd = std::max(g_cursor, g_selection);
-
-                        g_fileContents.replace(
-                            selectionStart, selectionEnd - selectionStart,
-                            text, strlen(text));
-
-                        g_cursor = std::max(g_cursor, g_selection);
-                        g_selection = -1;
-                    }
-                    else {
-                        g_fileContents.insert(g_cursor, text, strlen(text));
-                        g_cursor += strlen(text);
-                    }
+                    // paste (not implemented)
 
                     GlobalUnlock(hGlobal);
                 }
@@ -480,16 +470,16 @@ bool HandleKeyPress(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState)
     return false;
 }
 
-void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight)
+void get_cursor_position(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight)
 {
-    const wchar_t* fullBlock = L"\x2588";
+    const wchar_t* full_block = L"\x2588";
 
     SIZE size;
 
     if (!GetTextExtentPoint32(
             hdc,
-            fullBlock,
-            wcslen(fullBlock),
+            full_block,
+            wcslen(full_block),
             &size)) {
         DebugBreak();
         abort();
@@ -497,22 +487,22 @@ void GetCursorPosition(HDC hdc, int cursorIndex, int* x, int* y, int *textHeight
 
     // TODO test this following part of the function
 
-    int cursorLineIdx = 0;
-    int lineStart = 0;
+    int cursor_line_idx = 0;
+    int line_start = 0;
 
-    for (int i = 0; i <= g_fileContents.length(); i++) {
-        if (i > 0 && g_fileContents[i - 1] == L'\n') {
-            lineStart = i;
-            cursorLineIdx++;
+    for (int i = 0; i <= file_len; i++) {
+        if (i > 0 && file_contents[i - 1] == L'\n') {
+            line_start = i;
+            cursor_line_idx++;
         }
 
         if (i == cursorIndex)
             break;
     }
 
-    int cursorColumnIdx = cursorIndex - lineStart;
+    int cursorColumnIdx = cursorIndex - line_start;
 
     *x = cursorColumnIdx * size.cx;
-    *y = (cursorLineIdx + 1) * size.cy;
+    *y = (cursor_line_idx + 1) * size.cy;
     *textHeight = size.cy;
 }

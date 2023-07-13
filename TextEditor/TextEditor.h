@@ -39,4 +39,60 @@ CFUNCTION void tstr_to_wcstr(wchar_t* dest, const TCHAR * source, size_t n);
 CFUNCTION void cstr_to_tstr(TCHAR * dest, const char* source, size_t n);
 CFUNCTION void wcstr_to_tstr(TCHAR * dest, const wchar_t* source, size_t n);
 
+#ifndef __cplusplus
+#define min(a, b) \
+    _Generic((a), \
+        char : min_c, \
+        short : min_h, \
+        int : min_i, \
+        long : min_l, \
+        long long : min_ll, \
+        unsigned char : min_uc, \
+        unsigned short : min_uh, \
+        unsigned int : min_ui, \
+        unsigned long : min_ul, \
+        unsigned long long : min_ull, \
+        size_t : min_z \
+        )(a, b)
+
+#define max(a, b) \
+    _Generic((a), \
+        char : max_c, \
+        short : max_h, \
+        int : max_i, \
+        long : max_l, \
+        long long : max_ll, \
+        unsigned char : max_uc, \
+        unsigned short : max_uh, \
+        unsigned int : max_ui, \
+        unsigned long : max_ul, \
+        unsigned long long : max_ull, \
+        size_t : max_z, \
+        )(a, b)
+#endif // __cplusplus
+
+char min_c(char a, char b);
+short min_h(short a, short b);
+int min_i(int a, int b);
+long min_l(long a, long b);
+long long min_ll(long long a, long long b);
+unsigned char min_uc(char a, char b);
+unsigned short min_uh(short a, short b);
+unsigned int min_ui(int a, int b);
+unsigned long min_ul(long a, long b);
+unsigned long long min_ull(long long a, long long b);
+size_t min_z(size_t a, size_t b);
+
+char max_c(char a, char b);
+short max_h(short a, short b);
+int max_i(int a, int b);
+long max_l(long a, long b);
+long long max_ll(long long a, long long b);
+unsigned char max_uc(char a, char b);
+unsigned short max_uh(short a, short b);
+unsigned int max_ui(int a, int b);
+unsigned long max_ul(long a, long b);
+unsigned long long max_ull(long long a, long long b);
+size_t max_z(size_t a, size_t b);
+
 #endif // TEXT_EDITOR_H

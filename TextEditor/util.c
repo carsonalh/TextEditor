@@ -5,6 +5,116 @@
 #define ERROR_PORTION_LEN ((size_t)64)
 #define MESSAGE_LEN ((size_t)1024)
 
+char min_c(char a, char b)
+{
+    return a < b ? a : b;
+}
+
+short min_h(short a, short b)
+{
+    return a < b ? a : b;
+}
+
+int min_i(int a, int b)
+{
+    return a < b ? a : b;
+}
+
+long min_l(long a, long b)
+{
+    return a < b ? a : b;
+}
+
+long long min_ll(long long a, long long b)
+{
+    return a < b ? a : b;
+}
+
+unsigned char min_uc(char a, char b)
+{
+    return a < b ? a : b;
+}
+
+unsigned short min_uh(short a, short b)
+{
+    return a < b ? a : b;
+}
+
+unsigned int min_ui(int a, int b)
+{
+    return a < b ? a : b;
+}
+
+unsigned long min_ul(long a, long b)
+{
+    return a < b ? a : b;
+}
+
+unsigned long long min_ull(long long a, long long b)
+{
+    return a < b ? a : b;
+}
+
+size_t min_z(size_t a, size_t b)
+{
+    return a < b ? a : b;
+}
+
+char max_c(char a, char b)
+{
+    return a > b ? a : b;
+}
+
+short max_h(short a, short b)
+{
+    return a > b ? a : b;
+}
+
+int max_i(int a, int b)
+{
+    return a > b ? a : b;
+}
+
+long max_l(long a, long b)
+{
+    return a > b ? a : b;
+}
+
+long long max_ll(long long a, long long b)
+{
+    return a > b ? a : b;
+}
+
+unsigned char max_uc(char a, char b)
+{
+    return a > b ? a : b;
+}
+
+unsigned short max_uh(short a, short b)
+{
+    return a > b ? a : b;
+}
+
+unsigned int max_ui(int a, int b)
+{
+    return a > b ? a : b;
+}
+
+unsigned long max_ul(long a, long b)
+{
+    return a > b ? a : b;
+}
+
+unsigned long long max_ull(long long a, long long b)
+{
+    return a > b ? a : b;
+}
+
+size_t max_z(size_t a, size_t b)
+{
+    return a > b ? a : b;
+}
+
 void tstr_to_cstr(char *dest, const TCHAR *source, size_t n)
 {
     while (n-- && (*dest++ = (char)*source++))
