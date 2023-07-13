@@ -24,24 +24,24 @@
 
 
 /* Used to crash the program. Will print out result of GetLastError() and give a (somewhat) meaningful message. */
-CFUNCTION bool _Fatal(const TCHAR*);
+bool _Fatal(const TCHAR*);
 
 #define CONSOLE_WINDOW_CLASS TEXT("ConsoleWindow")
-
-CFUNCTION void register_console_window_class();
+void register_console_window_class();
 
 #define FILE_TREE_WINDOW_CLASS TEXT("FileTreeWindow")
+void register_file_tree_window_class(void);
 
-CFUNCTION void register_file_tree_window_class(void);
+#define EDITOR_WINDOW_CLASS TEXT("EditorWindow")
+void register_editor_window_class(void);
 
-CFUNCTION void tstr_to_cstr(char* dest, const TCHAR * source, size_t n);
-CFUNCTION void tstr_to_wcstr(wchar_t* dest, const TCHAR * source, size_t n);
-CFUNCTION void cstr_to_tstr(TCHAR * dest, const char* source, size_t n);
-CFUNCTION void wcstr_to_tstr(TCHAR * dest, const wchar_t* source, size_t n);
+void tstr_to_cstr(char* dest, const TCHAR * source, size_t n);
+void tstr_to_wcstr(wchar_t* dest, const TCHAR * source, size_t n);
+void cstr_to_tstr(TCHAR * dest, const char* source, size_t n);
+void wcstr_to_tstr(TCHAR * dest, const wchar_t* source, size_t n);
 
-#ifndef __cplusplus
 #define min(a, b) \
-    _Generic((a), \
+    _Generic(a, \
         char : min_c, \
         short : min_h, \
         int : min_i, \
@@ -51,12 +51,11 @@ CFUNCTION void wcstr_to_tstr(TCHAR * dest, const wchar_t* source, size_t n);
         unsigned short : min_uh, \
         unsigned int : min_ui, \
         unsigned long : min_ul, \
-        unsigned long long : min_ull, \
-        size_t : min_z \
+        unsigned long long : min_ull \
         )(a, b)
 
 #define max(a, b) \
-    _Generic((a), \
+    _Generic(a, \
         char : max_c, \
         short : max_h, \
         int : max_i, \
@@ -66,10 +65,8 @@ CFUNCTION void wcstr_to_tstr(TCHAR * dest, const wchar_t* source, size_t n);
         unsigned short : max_uh, \
         unsigned int : max_ui, \
         unsigned long : max_ul, \
-        unsigned long long : max_ull, \
-        size_t : max_z, \
+        unsigned long long : max_ull \
         )(a, b)
-#endif // __cplusplus
 
 char min_c(char a, char b);
 short min_h(short a, short b);
@@ -81,7 +78,6 @@ unsigned short min_uh(short a, short b);
 unsigned int min_ui(int a, int b);
 unsigned long min_ul(long a, long b);
 unsigned long long min_ull(long long a, long long b);
-size_t min_z(size_t a, size_t b);
 
 char max_c(char a, char b);
 short max_h(short a, short b);
@@ -93,6 +89,5 @@ unsigned short max_uh(short a, short b);
 unsigned int max_ui(int a, int b);
 unsigned long max_ul(long a, long b);
 unsigned long long max_ull(long long a, long long b);
-size_t max_z(size_t a, size_t b);
 
 #endif // TEXT_EDITOR_H

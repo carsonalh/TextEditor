@@ -55,11 +55,6 @@ unsigned long long min_ull(long long a, long long b)
     return a < b ? a : b;
 }
 
-size_t min_z(size_t a, size_t b)
-{
-    return a < b ? a : b;
-}
-
 char max_c(char a, char b)
 {
     return a > b ? a : b;
@@ -106,11 +101,6 @@ unsigned long max_ul(long a, long b)
 }
 
 unsigned long long max_ull(long long a, long long b)
-{
-    return a > b ? a : b;
-}
-
-size_t max_z(size_t a, size_t b)
 {
     return a > b ? a : b;
 }
