@@ -54,9 +54,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     // Create the window.
 
     HWND master_window = CreateWindow(
-        MASTER_WINDOW_CLASS,                     // Window class
-        L"Text Editor.exe",    // Window text
-        WS_OVERLAPPEDWINDOW,            // Window style
+        MASTER_WINDOW_CLASS,     // Window class
+        TEXT("Text Editor.exe"), // Window text
+        WS_OVERLAPPEDWINDOW,     // Window style
 
         // Size and position
         CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
