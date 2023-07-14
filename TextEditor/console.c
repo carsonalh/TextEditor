@@ -4,17 +4,28 @@
 #include <tchar.h>
 
 #include <stdlib.h>
+#include <assert.h>
 
 #define OUTPUT_BUFFER_LEN ((size_t)0x2000)
-#define INPUT_LEN ((size_t)256)
+#define INPUT_BUFFER_LEN ((size_t)0x400)
 
 // Pipe ends to communicate with cmd.exe
-static HANDLE stdin_write, stdout_read;
+static HANDLE input_write, output_read;
 
-static char output_buffer[OUTPUT_BUFFER_LEN];
+static struct ring_buffer {
+	int end; // exclusive
+	bool full;
+	/* we only use the first half of buffer, but when we need a contiguous string (i.e. the buffer is full),
+	   we can use the second half to copy the first half over */
+	char buffer[2 * OUTPUT_BUFFER_LEN];
+} output_rb = { 0 };
 
-static char console_input[INPUT_LEN];
-static size_t console_input_len = 0;
+static struct input_buffer {
+	static_assert(INT_MAX >= INPUT_BUFFER_LEN, "all input buffer locations must be addressable");
+
+	int length;
+	char buffer[INPUT_BUFFER_LEN];
+} input_buf = { 0 };
 
 static HWND console_window;
 static HFONT console_font;
@@ -24,29 +35,8 @@ static LRESULT CALLBACK console_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam,
 static DWORD console_read_task(void* argument);
 static int text_height_px(HDC hdc);
 static int text_width_px(HDC hdc);
+static int buffer_height_px(HDC hdc);
 static void write_to_stdin(const char *string, size_t n);
-
-static int buffer_height_px(HDC hdc)
-{
-	const size_t output_buffer_len = strlen(output_buffer);
-	SIZE size;
-	if (!GetTextExtentPoint32A(
-			hdc,
-			output_buffer,
-			output_buffer_len,
-			&size))
-		FATALW("Calculate text size buffer scrolling");
-
-	// GetTextExtentPoint32A does not account for new lines
-
-	size_t lines = 1;
-
-	for (int i = 0; i < output_buffer_len; i++)
-		if (output_buffer[i] == '\n')
-			++lines;
-
-	return lines * size.cy;
-}
 
 void register_console_window_class(void)
 {
@@ -65,7 +55,6 @@ static LRESULT CALLBACK console_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam,
 	case WM_CREATE:
 	{
 		console_window = hwnd;
-		memset(output_buffer, 0, sizeof output_buffer);
 
 		HANDLE input_read, output_write;
 
@@ -78,8 +67,8 @@ static LRESULT CALLBACK console_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
 		#define PIPE_SIZE 1024
 
-		if (!CreatePipe(&input_read, &stdin_write, &sa, PIPE_SIZE))	  FATALW("Pipe input");
-		if (!CreatePipe(&stdout_read, &output_write, &sa, PIPE_SIZE)) FATALW("Pipe stdout");
+		if (!CreatePipe(&input_read, &input_write, &sa, PIPE_SIZE))	  FATALW("Pipe input");
+		if (!CreatePipe(&output_read, &output_write, &sa, PIPE_SIZE)) FATALW("Pipe stdout");
 
 		STARTUPINFO si;
 		memset(&si, 0, sizeof si);
@@ -142,17 +131,16 @@ static LRESULT CALLBACK console_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam,
 		char char_param = (char)wParam;
 		switch (char_param) {
 		case '\b':
-			console_input_len--;
+			input_buf.length = max(input_buf.length - 1, 0);
 			break;
 		case '\r':
-			strncpy(&console_input[console_input_len], "\r\n", INPUT_LEN - console_input_len);
-			write_to_stdin(console_input, INPUT_LEN);
-			memset(console_input, 0, sizeof console_input);
-			console_input_len = 0;
+			strncpy(&input_buf.buffer[input_buf.length], "\r\n", INPUT_BUFFER_LEN - input_buf.length);
+			write_to_stdin(input_buf.buffer, INPUT_BUFFER_LEN);
+			memset(&input_buf, 0, sizeof input_buf);
 			break;
 		default:
-			if (console_input_len < INPUT_LEN)
-				console_input[console_input_len++] = char_param;
+			if (input_buf.length < INPUT_BUFFER_LEN)
+				input_buf.buffer[input_buf.length++] = char_param;
 		}
 
 		InvalidateRect(hwnd, NULL, true);
@@ -189,7 +177,13 @@ static LRESULT CALLBACK console_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam,
 				.left = client.left, .right = client.right,
 			};
 
-			DrawTextA(hdc, output_buffer, -1, &text_area, DT_BOTTOM | DT_LEFT);
+			if (output_rb.full) {
+				memset(&output_rb.buffer[OUTPUT_BUFFER_LEN], 0, OUTPUT_BUFFER_LEN);
+				memcpy(&output_rb.buffer[OUTPUT_BUFFER_LEN], output_rb.buffer, output_rb.end);
+				DrawTextA(hdc, &output_rb.buffer[output_rb.end], OUTPUT_BUFFER_LEN, &text_area, DT_BOTTOM | DT_LEFT);
+			}
+			else
+				DrawTextA(hdc, output_rb.buffer, output_rb.end, &text_area, DT_BOTTOM | DT_LEFT);
 		}
 
 		// draw console input
@@ -197,24 +191,25 @@ static LRESULT CALLBACK console_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam,
 			const int height = text_height_px(hdc);
 			const int width = text_width_px(hdc);
 
-			const char* c = &output_buffer[strlen(output_buffer)];
-			while (*(--c) != '\n')
-				;
-			c++;
-			size_t last_line_len = strlen(c);
+			size_t last_line_len = 0;
+			
+			for (int i = output_rb.end - 1;
+					i != output_rb.end && output_rb.buffer[i] != '\n';
+					i = (i - 1) % OUTPUT_BUFFER_LEN)
+				++last_line_len;
 
 			const RECT text_area = {
 				.top = client.bottom - height, .bottom = client.bottom,
 				.left = client.left + last_line_len * width, .right = client.right,
 			};
 
-			DrawTextA(hdc, console_input, console_input_len, &text_area, DT_BOTTOM | DT_LEFT);
+			DrawTextA(hdc, input_buf.buffer, input_buf.length, &text_area, DT_BOTTOM | DT_LEFT);
 
 			// draw the cursor
 
 			const RECT cursor = {
-				.left = (last_line_len + console_input_len) * width,
-				.right = (1 + last_line_len + console_input_len) * width,
+				.left = (last_line_len + input_buf.length) * width,
+				.right = (1 + last_line_len + input_buf.length) * width,
 				.bottom = client.bottom, .top = client.bottom - height,
 			};
 
@@ -240,14 +235,25 @@ static DWORD console_read_task(void* argument)
 		FATALW("ConsoleReadThread expected argument to be NULL");
 
 	char local_buffer[OUTPUT_BUFFER_LEN];
-	DWORD bytes_read;
 
 	while (true) {
-		if (!ReadFile(stdout_read, local_buffer, OUTPUT_BUFFER_LEN, &bytes_read, NULL))
+		DWORD bytes_read;
+
+		if (!ReadFile(output_read, local_buffer, OUTPUT_BUFFER_LEN, &bytes_read, NULL))
 			FATALW("ConsoleReadThread read console stdout");
 
-		size_t console_output_length = strlen(output_buffer);
-		memcpy(&output_buffer[console_output_length], local_buffer, bytes_read);
+		if (output_rb.end + bytes_read >= OUTPUT_BUFFER_LEN) {
+			const size_t first_half = OUTPUT_BUFFER_LEN - output_rb.end;
+			const size_t second_half = bytes_read - first_half;
+			memcpy(&output_rb.buffer[output_rb.end], local_buffer, first_half);
+			memcpy(output_rb.buffer, &local_buffer[first_half], second_half);
+			output_rb.full = true;
+		}
+		else {
+			memcpy(&output_rb.buffer[output_rb.end], local_buffer, bytes_read);
+		}
+
+		output_rb.end = (output_rb.end + bytes_read) % OUTPUT_BUFFER_LEN;
 
 		InvalidateRect(console_window, NULL, true);
 	}
@@ -287,12 +293,22 @@ static int text_width_px(HDC hdc)
 	return size.cx;
 }
 
+static int buffer_height_px(HDC hdc)
+{
+	size_t lines = 1;
+
+	for (int i = 0; i < OUTPUT_BUFFER_LEN; i++)
+		lines += output_rb.buffer[i] == '\n';
+
+	return lines * text_height_px(hdc);
+}
+
 static void write_to_stdin(const char* string, size_t n)
 {
 	DWORD bytes_written;
 
 	const size_t length = strnlen(string, n);
 
-	if (!WriteFile(stdin_write, string, length, &bytes_written, NULL))
+	if (!WriteFile(input_write, string, length, &bytes_written, NULL))
 		FATALW("Send console input to stdin WriteFile");
 }
