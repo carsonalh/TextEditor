@@ -5,6 +5,7 @@
 #define UNICODE
 #endif
 
+#define __STDC__ 1
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
