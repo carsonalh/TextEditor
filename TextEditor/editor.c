@@ -27,9 +27,10 @@ static struct file_buffer {
 	int cursor;
 	int cursor_colidx; // which column the cursor "wants" to be on when jumping up/down
 	int selection; // negative value denotes that no text is selected
+	int selection_colidx; // which column the selection cursor "wants" to be on
 	size_t length;
 	char contents[MAX_FILE];
-} file_buf = { .selection = -1 };
+} file_buf = { .selection = -1, .cursor_colidx = -1, .selection_colidx = -1 };
 
 static struct mouse_state {
 	bool dragging;
@@ -71,14 +72,171 @@ static DWORD editor_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 	}
 	case WM_PAINT:
 	{
-
 		PAINTSTRUCT ps;
 		HDC hdc = BeginPaint(hwnd, &ps);
 		HBRUSH brush = CreateSolidBrush(RGB(255, 0x0, 0x0));
 
 		FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
 
-		{ // draw text
+		SetBkColor(hdc, RGB(255, 255, 255));
+		SetTextColor(hdc, RGB(0, 0, 0));
+
+		SelectFont(hdc, editor_font);
+
+		if (file_buf.selection >= 0) {
+			// Draw text, selection, text
+
+			RECT draw_rect;
+
+			const int selection_begin = min(file_buf.cursor, file_buf.selection);
+			const int selection_end = max(file_buf.cursor, file_buf.selection);
+
+			int line_begin = 0, line = 0;
+			int i;
+
+			for (i = 0; i < file_buf.length && i < selection_begin; i++) {
+				if (i > 0 && file_buf.contents[i - 1] == '\n')
+					line_begin = i;
+
+				if (file_buf.contents[i] == '\n') {
+					draw_rect = (RECT){
+						.left = 0, .right = char_width_px * (i - line_begin),
+						.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+					};
+					DrawTextA(hdc, &file_buf.contents[line_begin], i - line_begin, &draw_rect, DT_TOP | DT_LEFT);
+					line++;
+				}
+			}
+
+			{ // paint the line before the selection
+				draw_rect = (RECT){
+					.left = 0, .right = char_width_px * (i - line_begin),
+					.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+				};
+				DrawTextA(hdc, &file_buf.contents[line_begin], i - line_begin, &draw_rect, DT_TOP | DT_LEFT);
+			}
+
+			const int selection_begin_colidx = i - line_begin;
+
+			int j;
+			bool one_line_selection = true;
+			for (j = i; j < file_buf.length && j < selection_end; j++)
+				if (file_buf.contents[j] == '\n') {
+					one_line_selection = false;
+					break;
+				}
+
+			SetBkColor(hdc, RGB(0, 0, 255));
+			SetTextColor(hdc, RGB(255, 255, 255));
+
+			if (one_line_selection) {
+				const int selection_end_colidx = selection_end - line_begin;
+
+				draw_rect = (RECT){
+					.left = char_width_px * selection_begin_colidx, .right = char_width_px * selection_end_colidx,
+					.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+				};
+
+				DrawTextA(hdc, &file_buf.contents[selection_begin], selection_end - selection_begin, &draw_rect, DT_TOP | DT_LEFT);
+			}
+			else {
+				{ // paint the half of the first selection line
+					while (i < file_buf.length && file_buf.contents[i] != '\n')
+						i++;
+
+					draw_rect = (RECT){
+						.left = char_width_px * selection_begin_colidx, .right = char_width_px * i,
+						.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+					};
+
+					DrawTextA(hdc, &file_buf.contents[selection_begin], i - selection_begin, &draw_rect, DT_TOP | DT_LEFT);
+
+					if (i < file_buf.length) {
+						i++;
+						line++;
+						line_begin = i;
+					}
+				}
+
+				{ // paint the lines in between
+					for (i++; i < file_buf.length && i < selection_end; i++) {
+						if (i > 0 && file_buf.contents[i - 1] == '\n') {
+							line_begin = i;
+							line++;
+						}
+
+						if (file_buf.contents[i] == '\n') {
+							draw_rect = (RECT){
+								.left = 0, .right = char_width_px * (i - line_begin),
+								.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+							};
+
+							DrawTextA(hdc, &file_buf.contents[line_begin], i - line_begin, &draw_rect, DT_TOP | DT_LEFT);
+						}
+					}
+				}
+
+				{ // paint the half of the last selection line
+					draw_rect = (RECT){
+						.left = 0, .right = char_width_px * (i - line_begin),
+						.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+					};
+
+					DrawTextA(hdc, &file_buf.contents[line_begin], i - line_begin, &draw_rect, DT_TOP | DT_LEFT);
+				}
+			}
+
+			SetBkColor(hdc, RGB(255, 255, 255));
+			SetTextColor(hdc, RGB(0, 0, 0));
+
+			{ // paint the second half of the first unselected line
+				const int selection_end_colidx = selection_end - line_begin;
+
+				while (i < file_buf.length && file_buf.contents[i] != '\n')
+					i++;
+
+				draw_rect = (RECT){
+					.left = char_width_px * selection_end_colidx, .right = char_width_px * (i - line_begin),
+					.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+				};
+
+				DrawTextA(hdc, &file_buf.contents[selection_end], i - selection_end, &draw_rect, DT_TOP | DT_LEFT);
+
+				if (i < file_buf.length)
+					i++;
+			}
+
+			{ // paint the rest of the lines
+				for (; i < file_buf.length; i++) {
+					if (i > 0 && file_buf.contents[i - 1] == '\n') {
+						line++;
+						line_begin = i;
+					}
+
+					if (file_buf.contents[i] == '\n') {
+						draw_rect = (RECT){
+							.left = 0, .right = char_width_px * (i - line_begin),
+							.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+						};
+
+						DrawTextA(hdc, &file_buf.contents[line_begin], i - line_begin, &draw_rect, DT_TOP | DT_LEFT);
+					}
+				}
+
+				// paint the last line
+
+				assert(i == file_buf.length);
+
+				draw_rect = (RECT){
+					.left = 0, .right = char_width_px * (i - line_begin),
+					.top = line * char_height_px, .bottom = (1 + line) * char_height_px,
+				};
+				DrawTextA(hdc, &file_buf.contents[line_begin], i - line_begin, &draw_rect, DT_TOP | DT_LEFT);
+			}
+		}
+		else {
+			// Just draw text
+
 			RECT rect;
 
 			GetWindowRect(hwnd, &rect);
@@ -88,8 +246,6 @@ static DWORD editor_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 			rect.left = rect.top = 0;
 			rect.right = windowWidth;
 			rect.bottom = windowHeight;
-
-			SelectFont(hdc, editor_font);
 
 			DrawTextA(hdc, file_buf.contents, file_buf.length, &rect, DT_TOP | DT_LEFT);
 		}
@@ -105,22 +261,6 @@ static DWORD editor_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 			cursorRect.top = y - textHeight;
 
 			FillRect(hdc, &cursorRect, brush);
-		}
-
-		if (file_buf.selection >= 0) {
-			HBRUSH selectBrush = CreateSolidBrush(RGB(0, 0, 255));
-
-			int x, y, textHeight;
-			get_cursor_position(hdc, file_buf.selection, &x, &y, &textHeight);
-			RECT selectionRect;
-
-			selectionRect.left = x;
-			selectionRect.right = x + CURSOR_WIDTH_PX;
-			selectionRect.bottom = y;
-			selectionRect.top = y - textHeight;
-
-			FillRect(hdc, &selectionRect, selectBrush);
-			DeleteObject(selectBrush);
 		}
 
 		// cache the character width and height for future operations (mouse related)
@@ -205,7 +345,7 @@ static DWORD editor_window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 			
 			remove_buffer_portion(delete_start, delete_end);
 			file_buf.cursor = delete_start;
-			file_buf.selection = -1;
+			file_buf.selection_colidx = file_buf.selection = -1;
 			file_buf.length -= delete_end - delete_start;
 		}
 		case '\t':
@@ -278,6 +418,13 @@ static bool handle_key_press(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState
 			else {
 				file_buf.selection = max(0, file_buf.selection - 1);
 			}
+
+			int colidx = 0;
+
+			for (int i = file_buf.selection; i > 0 && file_buf.contents[i - 1] != '\n'; i--)
+				colidx++;
+
+			file_buf.selection_colidx = colidx;
 		}
 		else {
 			if (file_buf.selection < 0) {
@@ -300,6 +447,13 @@ static bool handle_key_press(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState
 			else {
 				file_buf.selection = min(file_buf.selection + 1, (int)file_buf.length);
 			}
+
+			int colidx = 0;
+
+			for (int i = file_buf.selection; i > 0 && file_buf.contents[i - 1] != '\n'; i--)
+				colidx++;
+
+			file_buf.selection_colidx = colidx;
 		}
 		else {
 			if (file_buf.selection < 0) {
@@ -314,76 +468,154 @@ static bool handle_key_press(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState
 	}
 	case VK_UP:
 	{
-		int i;
-		int current_column = 0;
+		if (shift_pressed) {
+			int i;
 
-		for (i = file_buf.cursor; i > 0; current_column++, i--)
-			if (file_buf.contents[i - 1] == '\n')
-				break;
+			if (file_buf.selection < 0) {
+				int current_column = 0;
 
-		if (file_buf.cursor_colidx < 0)
-			file_buf.cursor_colidx = current_column;
+				for (i = file_buf.cursor; i > 0; current_column++, i--)
+					if (file_buf.contents[i - 1] == '\n')
+						break;
 
-		// i is at the beginning of the current line
+				file_buf.selection_colidx = current_column;
+				file_buf.selection = file_buf.cursor;
+			}
+			else {
+				assert(file_buf.selection_colidx >= 0);
 
-		const bool on_first_line = i == 0;
-
-		if (on_first_line) {
-			file_buf.cursor = 0;
-			file_buf.cursor_colidx = -1;
-		}
-		else {
-			i--;
-
-			for (; i > 0; i--) {
-				if (file_buf.contents[i - 1] == '\n')
-					break;
+				for (i = file_buf.selection; i > 0; i--)
+					if (file_buf.contents[i - 1] == '\n')
+						break;
 			}
 
-			const int prevline_begin = i;
+			// i at the beginning of the current line
 
-			for (; i < file_buf.length && i - prevline_begin < file_buf.cursor_colidx; i++)
-				if (file_buf.contents[i] == '\n')
+			if (i == 0) {
+				file_buf.selection_colidx = file_buf.selection = 0;
+				goto up_complete;
+			}
+
+			while (i > 0 && file_buf.contents[--i - 1] != '\n')
+				;
+
+			assert(i >= 0);
+
+			const int previous_line_begin = i;
+
+			while (i - previous_line_begin < file_buf.selection_colidx && file_buf.contents[i] != '\n')
+				i++;
+
+			file_buf.selection = i;
+		}
+		else {
+			int i;
+			int current_column = 0;
+
+			for (i = file_buf.cursor; i > 0; current_column++, i--)
+				if (file_buf.contents[i - 1] == '\n')
 					break;
 
-			file_buf.cursor = i;
+			if (file_buf.cursor_colidx < 0)
+				file_buf.cursor_colidx = current_column;
+
+			// i is at the beginning of the current line
+
+			const bool on_first_line = i == 0;
+
+			if (on_first_line) {
+				file_buf.cursor = 0;
+				file_buf.cursor_colidx = -1;
+			}
+			else {
+				i--;
+
+				for (; i > 0; i--) {
+					if (file_buf.contents[i - 1] == '\n')
+						break;
+				}
+
+				const int prevline_begin = i;
+
+				for (; i < file_buf.length && i - prevline_begin < file_buf.cursor_colidx; i++)
+					if (file_buf.contents[i] == '\n')
+						break;
+
+				file_buf.cursor = i;
+			}
 		}
 
+		up_complete:
 		InvalidateRect(hwnd, NULL, false);
-
 		break;
 	}
 	case VK_DOWN:
 	{
-		if (file_buf.cursor_colidx < 0) {
-			int current_column = 0;
+		if (shift_pressed) {
+			if (file_buf.selection < 0) {
+				int current_column = 0;
 
-			for (int i = file_buf.cursor - 1; i >= 0; current_column++, i--)
-				if (file_buf.contents[i] == '\n')
-					break;
+				for (int i = file_buf.cursor - 1; i >= 0; current_column++, i--)
+					if (file_buf.contents[i] == '\n')
+						break;
 
-			file_buf.cursor_colidx = current_column;
-		}
-
-		int i;
-
-		for (i = file_buf.cursor; i < file_buf.length; i++)
-			if (file_buf.contents[i] == '\n') {
-				i++;
-				break;
+				file_buf.selection_colidx = current_column;
+				file_buf.selection = file_buf.cursor;
 			}
 
-		const int next_line_begin = i;
-		// at the beginning of the next line, let us traverse to the column in question
+			int i;
 
-		while (i < file_buf.length && i - next_line_begin < file_buf.cursor_colidx) {
-			if (file_buf.contents[i] == '\n')
-				break;
+			for (i = file_buf.selection; i < file_buf.length; i++)
+				if (file_buf.contents[i] == '\n') {
+					i++;
+					break;
+				}
+
+			const int next_line_begin = i;
+
+			while (i < file_buf.length && i - next_line_begin < file_buf.selection_colidx) {
+				if (file_buf.contents[i] == '\n')
+					break;
+				else
+					i++;
+			}
+
+			if (i != file_buf.cursor)
+				file_buf.selection = i;
 			else
-				i++;
+				file_buf.selection = file_buf.selection_colidx = -1;
 		}
+		else {
+			if (file_buf.cursor_colidx < 0) {
+				int current_column = 0;
 
-		file_buf.cursor = i;
+				for (int i = file_buf.cursor - 1; i >= 0; current_column++, i--)
+					if (file_buf.contents[i] == '\n')
+						break;
+
+				file_buf.cursor_colidx = current_column;
+			}
+
+			int i;
+
+			for (i = file_buf.cursor; i < file_buf.length; i++)
+				if (file_buf.contents[i] == '\n') {
+					i++;
+					break;
+				}
+
+			const int next_line_begin = i;
+			// at the beginning of the next line, let us traverse to the column in question
+
+			while (i < file_buf.length && i - next_line_begin < file_buf.cursor_colidx) {
+				if (file_buf.contents[i] == '\n')
+					break;
+				else
+					i++;
+			}
+
+			file_buf.cursor = i;
+		}
 
 		InvalidateRect(hwnd, NULL, false);
 
@@ -439,20 +671,18 @@ static bool handle_key_press(HWND hwnd, WPARAM virtualKeyCode, LPARAM otherState
 	return false;
 }
 
-static void get_cursor_position(HDC hdc, int cursorIndex, int* x, int* y, int* textHeight)
+static void get_cursor_position(HDC hdc, int cursor_idx, int *x, int *y, int *text_height)
 {
-	const wchar_t* full_block = L"\x2588";
+	const wchar_t *full_block = L"\x2588";
 
 	SIZE size;
 
 	if (!GetTextExtentPoint32(
-		hdc,
-		full_block,
-		wcslen(full_block),
-		&size)) {
-		DebugBreak();
-		abort();
-	}
+			hdc,
+			full_block,
+			wcslen(full_block),
+			&size))
+		FATALW("Calculate size of single block");
 
 	// TODO test this following part of the function
 
@@ -465,15 +695,15 @@ static void get_cursor_position(HDC hdc, int cursorIndex, int* x, int* y, int* t
 			cursor_line_idx++;
 		}
 
-		if (i == cursorIndex)
+		if (i == cursor_idx)
 			break;
 	}
 
-	int cursorColumnIdx = cursorIndex - line_start;
+	int cursor_column_idx = cursor_idx - line_start;
 
-	*x = cursorColumnIdx * size.cx;
+	*x = cursor_column_idx * size.cx;
 	*y = (cursor_line_idx + 1) * size.cy;
-	*textHeight = size.cy;
+	*text_height = size.cy;
 }
 
 static void remove_buffer_portion(int start, int end)
